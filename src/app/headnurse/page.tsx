@@ -3,12 +3,13 @@ import { q } from "@/lib/db";
 import { requireUser } from "@/lib/guard";
 import { AppShell, Section, DataTable, Badge } from "@/components/ui";
 import { DataForm } from "@/components/client";
+import { RefundPanel } from "@/components/refund";
 import { EX_TYPES, EX_STATUS, SEVERITY, dt, badgeClass, severityClass } from "@/lib/labels";
 
 export const dynamic = "force-dynamic";
 
 export default async function HeadNursePage() {
-  await requireUser(["head_nurse", "admin"]);
+  const user = await requireUser(["head_nurse", "admin"]);
   const exceptions = q(
     `SELECT e.*, r.number, s.mother_name FROM exceptions e
      JOIN stays s ON s.id=e.stay_id JOIN rooms r ON r.id=s.room_id
@@ -34,14 +35,28 @@ export default async function HeadNursePage() {
      JOIN stays s ON s.id=f.stay_id JOIN rooms r ON r.id=s.room_id
      WHERE f.status='pending' ORDER BY f.scheduled_at LIMIT 10`);
 
+  // 提前退所：尾款已冻结、待护士长核对护理动作
+  const refundPlans = q(
+    `SELECT rp.*, r.number, s.mother_name FROM refund_plans rp
+     JOIN stays s ON s.id=rp.stay_id JOIN rooms r ON r.id=s.room_id
+     WHERE rp.frozen=1 AND rp.care_confirmed=0 AND rp.status NOT IN ('refunded','rejected')
+     ORDER BY rp.frozen_at`);
+  const planEvents = q("SELECT * FROM refund_plan_events ORDER BY created_at DESC");
+
   return (
     <AppShell title="护士长工作台">
       <div className="grid cols-4">
         <div className="stat"><div className="num">{exceptions.length}</div><div className="label">待处理异常工单</div></div>
         <div className="stat"><div className="num">{disputes.filter((d) => d.status === "open").length}</div><div className="label">同步我的争议/质疑</div></div>
+        <div className="stat"><div className="num">{refundPlans.length}</div><div className="label">提前退所待护理核对</div></div>
         <div className="stat"><div className="num">{feedbacks.filter((f) => f.status === "new").length}</div><div className="label">待回复家属反馈</div></div>
-        <div className="stat"><div className="num">{leaves.length}</div><div className="label">月嫂请假待协调</div></div>
       </div>
+
+      {refundPlans.map((plan) => (
+        <RefundPanel key={String(plan.id)} plan={plan} user={user}
+          events={planEvents.filter((ev) => Number(ev.refund_plan_id) === Number(plan.id))}
+          roomNumber={String(plan.number)} compact />
+      ))}
 
       <Section title="异常工单中心（全中心）" tone={exceptions.length ? "tone-red" : ""}>
         <DataTable cols={["房间", "类型", "标题", "严重度", "状态", "责任角色", "处理"]} empty="暂无待处理异常"
@@ -54,7 +69,7 @@ export default async function HeadNursePage() {
             String(e.assigned_role),
             <DataForm key="f" compact action="exceptions.update" hidden={{ id: Number(e.id) }}
               fields={[
-                { name: "action", label: "操作", type: "select", required: true, options: [
+                { name: "op", label: "操作", type: "select", required: true, options: [
                   { value: "accept", label: "受理" }, { value: "note", label: "追加记录" },
                   { value: "resolve", label: "解决" }, { value: "close", label: "关闭" }] },
                 { name: "note", label: "处理说明" },

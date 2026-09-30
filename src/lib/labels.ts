@@ -58,6 +58,18 @@ export const FEE_TYPES: Record<string, string> = {
   refund: "退款",
 };
 
+// 提前退所退款方案流程状态：申请→方案生成→尾款冻结→护理核对→同步家属→财务复核
+export const REFUND_STATUS: Record<string, string> = {
+  draft: "待生成方案",
+  generated: "方案已生成",
+  frozen: "尾款冻结中",
+  care_confirmed: "护理已核对",
+  family_synced: "已同步家属",
+  reviewed: "已复核",
+  refunded: "已退款出所",
+  rejected: "复核驳回",
+};
+
 export const EX_STATUS: Record<string, string> = {
   open: "待处理",
   processing: "处理中",
@@ -100,8 +112,10 @@ export function dt(s: unknown): string {
 export function badgeClass(status: string): string {
   switch (status) {
     case "open": case "pending": case "issue": case "new": return "badge red";
-    case "processing": case "planned": case "scheduled": case "following": case "draft": return "badge amber";
-    case "resolved": case "done": case "confirmed": case "approved": case "delivered": case "responded": case "converted": return "badge green";
+    case "processing": case "planned": case "scheduled": case "following": case "draft":
+    case "generated": case "frozen": return "badge amber";
+    case "resolved": case "done": case "confirmed": case "approved": case "delivered": case "responded": case "converted":
+    case "reviewed": case "refunded": case "family_synced": case "care_confirmed": return "badge green";
     case "closed": case "cancelled": case "void": case "rejected": case "lost": return "badge gray";
     case "completed": case "active": case "in_stay": return "badge blue";
     case "checked_out": return "badge gray";

@@ -3,14 +3,19 @@ import { q, q1 } from "@/lib/db";
 import { requireUser } from "@/lib/guard";
 import { AppShell, Section, DataTable, KV, Badge } from "@/components/ui";
 import { DataForm } from "@/components/client";
+import { RefundPanel } from "@/components/refund";
 import { PLAN_TYPES, VISIT_STATUS, FEE_TYPES, money, dt, badgeClass } from "@/lib/labels";
 
 export const dynamic = "force-dynamic";
 
 export default async function FamilyPage() {
   const user = await requireUser(["family"]);
+  // 一个家属账号理论上关联一间房；若历史上关联多单（如重复演示），优先在住、其次最新
   const link = q1(
-    `SELECT fl.stay_id, fl.relation, fl.name AS link_name FROM family_links fl WHERE fl.user_id=? LIMIT 1`, user.id);
+    `SELECT fl.stay_id, fl.relation, fl.name AS link_name FROM family_links fl
+       JOIN stays s ON s.id=fl.stay_id
+      WHERE fl.user_id=?
+      ORDER BY (s.status='in_stay') DESC, fl.id DESC LIMIT 1`, user.id);
   if (!link) {
     return (
       <AppShell title="家属端">
@@ -37,6 +42,13 @@ export default async function FamilyPage() {
   const visits = showVisits ? q("SELECT * FROM visits WHERE stay_id=? ORDER BY visit_time DESC LIMIT 10", stayId) : [];
   const fees = showFees ? q("SELECT * FROM fees WHERE stay_id=? AND status='confirmed' ORDER BY created_at", stayId) : [];
   const settlement = showFees ? q1("SELECT * FROM settlements WHERE stay_id=?", stayId) : undefined;
+  // 仅展示已同步家属端的提前退所退款方案
+  const refundPlan = showFees
+    ? q1("SELECT * FROM refund_plans WHERE stay_id=? AND family_synced=1", stayId)
+    : undefined;
+  const refundEvents = refundPlan
+    ? q("SELECT * FROM refund_plan_events WHERE refund_plan_id=? ORDER BY created_at", Number(refundPlan.id))
+    : [];
   const feedbacks = q("SELECT * FROM feedbacks WHERE stay_id=? ORDER BY created_at DESC LIMIT 10", stayId);
   const followUps = q("SELECT * FROM follow_ups WHERE stay_id=? ORDER BY scheduled_at", stayId);
   const messages = q("SELECT * FROM messages WHERE stay_id=? AND audience IN ('all','family') ORDER BY created_at DESC LIMIT 10", stayId);
@@ -95,6 +107,10 @@ export default async function FamilyPage() {
               ])} />
           </Section>
         </div>
+      )}
+
+      {refundPlan && (
+        <RefundPanel plan={refundPlan} user={user} events={refundEvents} readOnly compact />
       )}
 
       <div className="grid cols-2">

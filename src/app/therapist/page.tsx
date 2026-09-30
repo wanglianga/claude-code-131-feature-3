@@ -39,8 +39,8 @@ export default async function TherapistPage() {
             <Badge key="s" text={STATUS_LABELS[String(s.status)] || String(s.status)} cls={badgeClass(String(s.status))} />,
             s.status === "scheduled" ? (
               <span key="ops" className="row">
-                <ActionButton action="schedules.update" payload={{ id: Number(s.id), action: "done" }} label="完成" kind="primary" />
-                <DataForm compact action="schedules.update" hidden={{ id: Number(s.id), action: "delay" }}
+                <ActionButton action="schedules.update" payload={{ id: Number(s.id), op: "done" }} label="完成" kind="primary" />
+                <DataForm compact action="schedules.update" hidden={{ id: Number(s.id), op: "delay" }}
                   fields={[
                     { name: "reason", label: "延期原因", required: true },
                     { name: "newTime", label: "改期至", type: "datetime-local", required: true },

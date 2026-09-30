@@ -38,7 +38,7 @@ export default async function NutritionistPage() {
             <Badge key="s" text={EX_STATUS[String(e.status)] || ""} cls={badgeClass(String(e.status))} />,
             <DataForm key="f" compact action="exceptions.update" hidden={{ id: Number(e.id) }}
               fields={[
-                { name: "action", label: "操作", type: "select", required: true, options: [
+                { name: "op", label: "操作", type: "select", required: true, options: [
                   { value: "accept", label: "受理" }, { value: "resolve", label: "解决" }] },
                 { name: "note", label: "调整方案", required: true, placeholder: "如：已更换为清蒸鸡肉，后续每餐双人核对" },
               ]} submitLabel="提交" />,

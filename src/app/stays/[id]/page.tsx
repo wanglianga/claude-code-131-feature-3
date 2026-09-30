@@ -4,6 +4,7 @@ import { q, q1, today } from "@/lib/db";
 import { requireUser, can, STAFF_ROLES } from "@/lib/guard";
 import { AppShell, Section, DataTable, KV, Badge } from "@/components/ui";
 import { DataForm, ActionButton } from "@/components/client";
+import { RefundPanel } from "@/components/refund";
 import {
   PLAN_TYPES, EX_TYPES, EX_STATUS, SEVERITY, FEE_TYPES, TASK_STATUS, VISIT_STATUS,
   money, dt, badgeClass, severityClass,
@@ -35,6 +36,10 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
   const gifts = q("SELECT * FROM gifts WHERE stay_id=? ORDER BY id", stayId);
   const fees = q("SELECT * FROM fees WHERE stay_id=? ORDER BY created_at DESC", stayId);
   const settlement = q1("SELECT * FROM settlements WHERE stay_id=?", stayId);
+  const refundPlan = q1("SELECT * FROM refund_plans WHERE stay_id=?", stayId);
+  const refundEvents = refundPlan
+    ? q("SELECT * FROM refund_plan_events WHERE refund_plan_id=? ORDER BY created_at", Number(refundPlan.id))
+    : [];
   const exceptions = q("SELECT * FROM exceptions WHERE stay_id=? ORDER BY status='open' DESC, id DESC", stayId);
   const exEvents = q(`SELECT e.* FROM exception_events e JOIN exceptions x ON x.id=e.exception_id
                       WHERE x.stay_id=? ORDER BY e.created_at DESC LIMIT 30`, stayId);
@@ -85,7 +90,7 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
             can(user, ["admin", "head_nurse", "nurse", "pediatrician", "nutritionist", "therapist", "frontdesk", "finance"]) && e.status !== "resolved" && e.status !== "closed" ? (
               <DataForm key="f" compact action="exceptions.update" hidden={{ id: Number(e.id) }}
                 fields={[
-                  { name: "action", label: "操作", type: "select", required: true, options: [
+                  { name: "op", label: "操作", type: "select", required: true, options: [
                     { value: "accept", label: "受理" }, { value: "note", label: "追加记录" },
                     { value: "resolve", label: "解决" }, { value: "close", label: "关闭" } ] },
                   { name: "note", label: "处理说明", placeholder: "处理过程 / 解决方案" },
@@ -224,13 +229,13 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
               can(user, ["frontdesk", "head_nurse", "admin"]) ? (
                 <span key="ops" className="row">
                   {v.status === "pending" && <>
-                    <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "approve" }} label="批准" kind="primary" />
-                    <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "reject" }} label="拒绝" kind="danger" />
+                    <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "approve" }} label="批准" kind="primary" />
+                    <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "reject" }} label="拒绝" kind="danger" />
                   </>}
                   {v.status === "approved" && !Number(v.disinfected) &&
-                    <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "disinfect" }} label="消毒登记" />}
+                    <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "disinfect" }} label="消毒登记" />}
                   {v.status === "approved" &&
-                    <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "complete" }} label="完成探访" />}
+                    <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "complete" }} label="完成探访" />}
                 </span>
               ) : <span key="x" className="muted small">-</span>,
             ])} />
@@ -288,8 +293,8 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
               <Badge key="b" text={{ scheduled: "已排班", done: "已完成", delayed: "已延期", cancelled: "已取消" }[String(s.status)] || String(s.status)} cls={badgeClass(String(s.status))} />,
               s.status === "scheduled" && can(user, ["therapist", "head_nurse", "admin"]) ? (
                 <span key="ops" className="row">
-                  <ActionButton action="schedules.update" payload={{ id: Number(s.id), action: "done" }} label="完成" />
-                  <DataForm compact action="schedules.update" hidden={{ id: Number(s.id), action: "delay" }}
+                  <ActionButton action="schedules.update" payload={{ id: Number(s.id), op: "done" }} label="完成" />
+                  <DataForm compact action="schedules.update" hidden={{ id: Number(s.id), op: "delay" }}
                     fields={[
                       { name: "reason", label: "延期原因", required: true },
                       { name: "newTime", label: "改期至", type: "datetime-local", required: true },
@@ -333,6 +338,12 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
         </Section>
       </div>
 
+      {/* 套餐提前退所退款方案 */}
+      {refundPlan && (
+        <RefundPanel plan={refundPlan} user={user} events={refundEvents}
+          roomNumber={String(stay.room_number)} />
+      )}
+
       {/* 费用与结算 */}
       <Section title="费用明细与结算"
         extra={can(user, ["finance", "admin"]) ? (
@@ -361,7 +372,9 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
               ["应收合计", money(settlement.total_charge)],
               ["退款合计", money(settlement.total_refund)],
               ["实收", money(settlement.paid)],
-              ["余额", <b key="b">{money(settlement.balance)}</b>],
+              ["余额", Number(settlement.balance) < 0
+                ? <b key="b" className="badge blue">平台应退 {money(-Number(settlement.balance))}</b>
+                : <b key="b">{money(settlement.balance)}</b>],
               ["状态", <Badge key="s" text={settlement.status === "confirmed" ? "已确认" : "待确认"} cls={badgeClass(String(settlement.status))} />],
               ["说明", String(settlement.detail || "-")],
             ]} />
@@ -375,9 +388,16 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
         ) : <div className="muted small mt8">尚未生成结算单（办理出所时自动生成）。</div>}
         {inStay && can(user, ["frontdesk", "finance", "admin"]) && (
           <div className="mt16 row">
-            <DataForm compact action="stays.checkout" hidden={{ stayId }}
-              fields={[{ name: "reason", label: "退所原因（提前退所必填）" }]}
-              submitLabel="办理出所 / 提前退所" />
+            {!refundPlan ? (
+              <DataForm compact action="stays.checkout" hidden={{ stayId }}
+                fields={[
+                  { name: "checkoutDate", label: "实际退所日期", type: "date", required: true, defaultValue: todayStr },
+                  { name: "reason", label: "退所原因（提前退所必填，如家庭原因）" },
+                ]}
+                submitLabel="办理出所 / 申请提前退所" />
+            ) : (
+              <span className="badge amber">提前退所结算进行中，请在上方退款方案中完成核对/冻结/复核</span>
+            )}
             {can(user, ["frontdesk", "admin"]) && (
               <DataForm compact action="stays.upgrade" hidden={{ stayId }}
                 fields={[{ name: "newPackageId", label: "升级至套餐", type: "select", required: true, options: packages.map((p) => ({ value: String(p.id), label: `${p.name}（${money(p.price)}）` })) }]}

@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS care_records(
   created_by_name TEXT DEFAULT '',
   visible_to_family INTEGER DEFAULT 1,
   disputed INTEGER DEFAULT 0,
+  checkout_confirmed INTEGER DEFAULT 0,
+  checkout_note TEXT DEFAULT '',
+  checkout_confirmed_by INTEGER,
+  checkout_confirmed_at TEXT,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE TABLE IF NOT EXISTS meals(
@@ -255,10 +259,71 @@ CREATE TABLE IF NOT EXISTS settlements(
   total_refund REAL DEFAULT 0,
   paid REAL DEFAULT 0,
   balance REAL DEFAULT 0,
+  frozen_balance REAL DEFAULT 0,
+  freeze_note TEXT DEFAULT '',
   detail TEXT DEFAULT '',
   status TEXT DEFAULT 'draft',
   confirmed_by INTEGER,
   confirmed_at TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+-- 套餐提前退所退款方案：平台核对 → 财务出方案/冻结尾款 → 护士长护理核对 → 同步家属 → 财务复核
+CREATE TABLE IF NOT EXISTS refund_plans(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stay_id INTEGER UNIQUE NOT NULL REFERENCES stays(id),
+  exception_id INTEGER,
+  apply_reason TEXT DEFAULT '',
+  planned_checkout TEXT NOT NULL,
+  expected_checkout TEXT NOT NULL,
+  -- 核对快照
+  lived_days INTEGER DEFAULT 0,
+  remain_days INTEGER DEFAULT 0,
+  package_price REAL DEFAULT 0,
+  package_days INTEGER DEFAULT 0,
+  daily_price REAL DEFAULT 0,
+  recovery_done_count INTEGER DEFAULT 0,
+  recovery_scheduled_count INTEGER DEFAULT 0,
+  meal_days INTEGER DEFAULT 0,
+  meal_cost REAL DEFAULT 0,
+  gifts_total REAL DEFAULT 0,
+  gifts_detail TEXT DEFAULT '[]',
+  deposit REAL DEFAULT 0,
+  extra_charge REAL DEFAULT 0,
+  paid_amount REAL DEFAULT 0,
+  -- 金额构成
+  stay_fee REAL DEFAULT 0,
+  recovery_fee REAL DEFAULT 0,
+  tail_frozen REAL DEFAULT 0,
+  refund_amount REAL DEFAULT 0,
+  adjustment REAL DEFAULT 0,
+  adjustment_note TEXT DEFAULT '',
+  detail TEXT DEFAULT '',
+  -- 流程状态
+  status TEXT DEFAULT 'draft',
+  frozen INTEGER DEFAULT 0,
+  frozen_at TEXT,
+  frozen_by INTEGER,
+  care_confirmed INTEGER DEFAULT 0,
+  care_confirmed_at TEXT,
+  care_confirmed_by INTEGER,
+  care_note TEXT DEFAULT '',
+  family_synced INTEGER DEFAULT 0,
+  family_synced_at TEXT,
+  reviewed INTEGER DEFAULT 0,
+  review_result TEXT DEFAULT '',
+  reviewed_at TEXT,
+  reviewed_by INTEGER,
+  created_by INTEGER,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS refund_plan_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  refund_plan_id INTEGER NOT NULL REFERENCES refund_plans(id),
+  user_id INTEGER,
+  user_name TEXT DEFAULT '',
+  action TEXT NOT NULL,
+  note TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE TABLE IF NOT EXISTS messages(
@@ -296,6 +361,7 @@ export function getDb(): DatabaseSync {
   db.exec("PRAGMA journal_mode=WAL;");
   db.exec("PRAGMA foreign_keys=ON;");
   db.exec(SCHEMA);
+  migrate(db);
   const cnt = db.prepare("SELECT COUNT(*) AS c FROM users").get() as Row;
   if (Number(cnt.c) === 0) {
     seed(db);
@@ -328,6 +394,22 @@ export function addDays(date: string, days: number): string {
   d.setDate(d.getDate() + days);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 轻量迁移：旧库补充新增列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）
+function migrate(db: DatabaseSync) {
+  const ensure = (table: string, column: string, ddl: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  };
+  ensure("care_records", "checkout_confirmed", "checkout_confirmed INTEGER DEFAULT 0");
+  ensure("care_records", "checkout_note", "checkout_note TEXT DEFAULT ''");
+  ensure("care_records", "checkout_confirmed_by", "checkout_confirmed_by INTEGER");
+  ensure("care_records", "checkout_confirmed_at", "checkout_confirmed_at TEXT");
+  ensure("settlements", "frozen_balance", "frozen_balance REAL DEFAULT 0");
+  ensure("settlements", "freeze_note", "freeze_note TEXT DEFAULT ''");
 }
 
 function seed(db: DatabaseSync) {

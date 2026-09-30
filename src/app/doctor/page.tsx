@@ -39,7 +39,7 @@ export default async function DoctorPage() {
             <Badge key="s" text={EX_STATUS[String(e.status)] || ""} cls={badgeClass(String(e.status))} />,
             <DataForm key="f" compact action="exceptions.update" hidden={{ id: Number(e.id) }}
               fields={[
-                { name: "action", label: "操作", type: "select", required: true, options: [
+                { name: "op", label: "操作", type: "select", required: true, options: [
                   { value: "accept", label: "受理" }, { value: "note", label: "追加记录" }, { value: "resolve", label: "解决" }] },
                 { name: "note", label: "诊疗意见", required: true },
               ]} submitLabel="提交" />,

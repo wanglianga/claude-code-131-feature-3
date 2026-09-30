@@ -148,3 +148,4 @@ input:focus, select:focus, textarea:focus { outline: 2px solid #d9c3a5; border-c
 .small { font-size: 12px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; }
+.mb16 { margin-bottom: 16px; }

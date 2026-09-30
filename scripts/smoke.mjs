@@ -127,9 +127,12 @@ for (const [u, p, home, marker] of roles) {
   check("家属访问他人房间被拒绝", r.ok === false);
 }
 
-// 12. 前台登记新入住（含家属账号）——动态选取空房，可重复运行
+// 12+13. 前台登记新入住 → 套餐提前退所全流程（申请→平台核对→生成方案→冻结套餐尾款→护理核对→同步家属→财务复核→出所）
 let smokeStayId = null;
 let smokeRoomId = null;
+let smokeCookie = null;
+// 每次运行使用唯一家属账号，避免重复运行产生多订单关联
+const smokeFamUser = `smokefam${Date.now().toString().slice(-6)}`;
 {
   const roomsRes = await fetch(`${BASE}/api/rooms`, { headers: { Cookie: cookies["front"] } });
   const roomsBody = await roomsRes.json();
@@ -141,32 +144,106 @@ let smokeRoomId = null;
       action: "stays.create", roomId: vacant.id, packageId: 1, motherName: "冒烟测试产妇", motherPhone: "13900000000",
       checkInDate: "2026-09-25", deliveryMethod: "顺产", postpartumDays: 3, feedingMethod: "母乳喂养",
       mealTaboos: "忌辛辣", babyName: "测测", babyWeight: 3.2, deposit: 5000,
-      familyUsername: "smokefam", familyPassword: "smoke123", familyName: "冒烟家属", familyRelation: "丈夫",
+      familyUsername: smokeFamUser, familyPassword: "smoke123", familyName: "冒烟家属", familyRelation: "丈夫",
     });
     check("前台入住登记", r.ok === true, JSON.stringify(r));
     if (r.ok) {
       smokeStayId = r.id;
-      const fam = await login("smokefam", "smoke123");
+      const fam = await login(smokeFamUser, "smoke123");
       check("新家属账号可登录", fam.ok === true);
+      smokeCookie = fam.cookie;
       const page = await get("/family", fam.cookie);
       check("新家属端显示入住信息", page.status === 200 && page.text.includes("冒烟测试产妇"));
     }
   }
 }
 
-// 13. 财务登记费用并走完整出所结算流程
 if (smokeStayId) {
-  const stays = await get("/finance", cookies["finance"]);
-  check("财务工作台可访问", stays.status === 200);
+  // 财务先登记一笔增项费用，纳入平台核对
   const fee = await doAction(cookies["finance"], { action: "fees.create", stayId: smokeStayId, type: "extra", direction: "charge", amount: 100, description: "冒烟测试增项" });
   check("财务登记增项费用", fee.ok === true);
-  const co = await doAction(cookies["finance"], { action: "stays.checkout", stayId: smokeStayId, reason: "冒烟测试提前退所" });
-  check("办理提前退所", co.ok === true, JSON.stringify(co));
-  const st = await doAction(cookies["finance"], { action: "settlements.confirm", stayId: smokeStayId });
-  check("确认结算", st.ok === true, JSON.stringify(st));
+
+  // 13.1 前台/财务提交提前退所申请（平台核对：已住天数/产康/餐食/赠品/押金）
+  const apply = await doAction(cookies["front"], { action: "stays.checkout", stayId: smokeStayId, checkoutDate: "2026-09-30", reason: "家庭原因需提前返乡" });
+  check("提交提前退所申请并完成平台核对", apply.ok === true && !!apply.planId, JSON.stringify(apply));
+  const dup = await doAction(cookies["front"], { action: "stays.checkout", stayId: smokeStayId, checkoutDate: "2026-09-30", reason: "重复申请" });
+  check("重复提前退所申请被拒绝", dup.ok === false);
+  const noReason = await doAction(cookies["finance"], { action: "stays.create", roomId: 999, packageId: 1, motherName: "x", checkInDate: "2026-09-30" });
+  check("不存在房间入住被拒绝", noReason.ok === false);
+
+  // 13.2 尾款未冻结前，护士长不能核对护理动作
+  const careEarly = await doAction(cookies["headnurse"], { action: "refunds.careConfirm", stayId: smokeStayId, note: "提前核对" });
+  check("尾款冻结前护理核对被拦截", careEarly.ok === false);
+
+  // 13.3 财务生成退款方案并冻结套餐尾款
+  const gen = await doAction(cookies["finance"], { action: "refunds.generate", stayId: smokeStayId, adjustment: 0 });
+  check("财务生成退款方案", gen.ok === true && /应退/.test(gen.message || ""), JSON.stringify(gen));
+  const fz = await doAction(cookies["finance"], { action: "refunds.freeze", stayId: smokeStayId });
+  check("财务冻结套餐尾款", fz.ok === true, JSON.stringify(fz));
+
+  // 13.4 冻结后结算单不可确认；护理未核对前不能同步家属/复核
+  const confirmFrozen = await doAction(cookies["finance"], { action: "settlements.confirm", stayId: smokeStayId });
+  check("尾款冻结期间结算确认被拦截", confirmFrozen.ok === false);
+  const syncEarly = await doAction(cookies["finance"], { action: "refunds.syncFamily", stayId: smokeStayId });
+  check("护理核对前同步家属被拦截", syncEarly.ok === false);
+  const reviewEarly = await doAction(cookies["finance"], { action: "refunds.review", stayId: smokeStayId, op: "approve" });
+  check("护理核对前财务复核被拦截", reviewEarly.ok === false);
+
+  // 13.5 家属端在同步前看不到退款方案
+  const famBefore = await get("/family", smokeCookie);
+  check("同步前家属端不可见退款方案", famBefore.status === 200 && !famBefore.text.includes("套餐提前退所退款方案"));
+
+  // 13.6 护士长核对已完成护理动作（费用与服务记录一致）
+  const care = await doAction(cookies["headnurse"], { action: "refunds.careConfirm", stayId: smokeStayId, note: "冒烟核对：护理动作与记录一致" });
+  check("护士长核对护理动作", care.ok === true, JSON.stringify(care));
+
+  // 13.7 未同步家属仍不能复核
+  const reviewBeforeSync = await doAction(cookies["finance"], { action: "refunds.review", stayId: smokeStayId, op: "approve" });
+  check("同步家属前财务复核被拦截", reviewBeforeSync.ok === false);
+
+  // 13.8 退款方案同步家属端，家属可见
+  const sync = await doAction(cookies["finance"], { action: "refunds.syncFamily", stayId: smokeStayId });
+  check("退款方案同步家属端", sync.ok === true, JSON.stringify(sync));
+  const famAfter = await get("/family", smokeCookie);
+  check("同步后家属端可见退款方案与应退金额", famAfter.status === 200 && famAfter.text.includes("套餐提前退所退款方案") && famAfter.text.includes("应退合计"));
+
+  // 13.9 财务复核通过 → 生成退款、确认结算、正式出所
+  const rv = await doAction(cookies["finance"], { action: "refunds.review", stayId: smokeStayId, op: "approve", note: "复核无误" });
+  check("财务复核退款并办理出所", rv.ok === true && /复核通过/.test(rv.message || ""), JSON.stringify(rv));
+
+  // 13.10 复核后：结算已确认、退款流水已生成、出所回访已生成
+  const finPage = await get("/finance", cookies["finance"]);
+  check("财务页含已完成提前退所退款", finPage.status === 200 && finPage.text.includes("已完成提前退所退款"));
+  const stayPage = await get(`/stays/${smokeStayId}`, cookies["admin"]);
+  check("房间视图含退款记录与出所回访", stayPage.status === 200 && stayPage.text.includes("提前退所出所回访"));
+  const coAgain = await doAction(cookies["finance"], { action: "stays.checkout", stayId: smokeStayId, checkoutDate: "2026-09-30", reason: "x" });
+  check("已出所订单不能重复办理", coAgain.ok === false);
+
   // 清理：房间恢复空房，保证冒烟可重复运行
   await doAction(cookies["front"], { action: "rooms.update", id: smokeRoomId, status: "vacant" });
 }
+
+// 13b. 正常到期出所：直接生成结算草稿 → 财务确认（不走退款流程）
+{
+  const roomsRes = await fetch(`${BASE}/api/rooms`, { headers: { Cookie: cookies["front"] } });
+  const vacant = ((await roomsRes.json()).rooms || []).find((r) => r.status === "vacant");
+  if (vacant) {
+    const cr = await doAction(cookies["front"], {
+      action: "stays.create", roomId: vacant.id, packageId: 1, motherName: "正常出所产妇",
+      checkInDate: "2026-09-01", postpartumDays: 28, feedingMethod: "母乳喂养", deposit: 3000,
+    });
+    if (cr.ok) {
+      const normalId = cr.id;
+      // 应出所 = 2026-09-01 + 28 = 2026-09-29；09-30 办理非提前
+      const co = await doAction(cookies["finance"], { action: "stays.checkout", stayId: normalId, checkoutDate: "2026-09-30", reason: "到期正常出所" });
+      check("正常到期出所直接生成结算草稿", co.ok === true, JSON.stringify(co));
+      const cf = await doAction(cookies["finance"], { action: "settlements.confirm", stayId: normalId });
+      check("正常出所结算确认成功", cf.ok === true, JSON.stringify(cf));
+      await doAction(cookies["front"], { action: "rooms.update", id: vacant.id, status: "vacant" });
+    }
+  }
+}
+
 
 // 14. 家属反馈 → 护士长回复并标记影响排班
 {

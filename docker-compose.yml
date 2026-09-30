@@ -1,0 +1,17 @@
+services:
+  mcare:
+    build: .
+    image: mcare-platform:latest
+    container_name: mcare-platform
+    ports:
+      - "3000:3000"
+    environment:
+      # 生产环境请改成强随机密钥
+      MCARE_SECRET: ${MCARE_SECRET:-change-me-in-production}
+      MCARE_DB: /app/data/mcare.db
+    volumes:
+      - mcare-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  mcare-data:

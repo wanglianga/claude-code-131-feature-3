@@ -93,13 +93,13 @@ export default async function FrontdeskPage() {
               Number(v.disinfected) ? <span key="d" className="badge green">已消毒</span> : <span key="nd" className="badge gray">未登记</span>,
               <span key="ops" className="row">
                 {v.status === "pending" && <>
-                  <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "approve" }} label="批准" kind="primary" />
-                  <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "reject" }} label="拒绝" kind="danger" />
+                  <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "approve" }} label="批准" kind="primary" />
+                  <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "reject" }} label="拒绝" kind="danger" />
                 </>}
                 {v.status === "approved" && !Number(v.disinfected) &&
-                  <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "disinfect" }} label="消毒登记" />}
+                  <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "disinfect" }} label="消毒登记" />}
                 {v.status === "approved" &&
-                  <ActionButton action="visits.update" payload={{ id: Number(v.id), action: "complete" }} label="完成" />}
+                  <ActionButton action="visits.update" payload={{ id: Number(v.id), op: "complete" }} label="完成" />}
               </span>,
             ])} />
         </Section>
