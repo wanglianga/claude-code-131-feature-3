@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS stays(
   check_in_date TEXT NOT NULL,
   expected_checkout TEXT NOT NULL,
   actual_checkout TEXT,
+  checkout_date TEXT,
   created_by INTEGER,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -261,6 +262,59 @@ CREATE TABLE IF NOT EXISTS settlements(
   confirmed_at TEXT,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
+-- 提前退所退款方案：平台核对已住天数/已执行产康/餐食成本/赠送服务/押金，冻结套餐尾款，护理主管核对后同步家属，财务复核退款
+CREATE TABLE IF NOT EXISTS refund_plans(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stay_id INTEGER UNIQUE NOT NULL REFERENCES stays(id),
+  reason TEXT DEFAULT '',
+  checkout_date TEXT NOT NULL,
+  stayed_days INTEGER DEFAULT 0,
+  remaining_days INTEGER DEFAULT 0,
+  daily_rate REAL DEFAULT 0,
+  room_charge REAL DEFAULT 0,
+  meal_days INTEGER DEFAULT 0,
+  meal_unit_cost REAL DEFAULT 0,
+  meal_cost REAL DEFAULT 0,
+  recovery_done_count INTEGER DEFAULT 0,
+  recovery_unit_cost REAL DEFAULT 0,
+  recovery_cost REAL DEFAULT 0,
+  gifts_delivered_value REAL DEFAULT 0,
+  gifts_note TEXT DEFAULT '',
+  deposit_amount REAL DEFAULT 0,
+  extra_charge REAL DEFAULT 0,
+  other_deduction REAL DEFAULT 0,
+  other_adjustment REAL DEFAULT 0,
+  adjustment_note TEXT DEFAULT '',
+  frozen_balance REAL DEFAULT 0,
+  total_consumed REAL DEFAULT 0,
+  total_refund REAL DEFAULT 0,
+  status TEXT DEFAULT 'draft',
+  care_verified INTEGER DEFAULT 0,
+  care_verified_by INTEGER,
+  care_verified_at TEXT,
+  care_note TEXT DEFAULT '',
+  family_status TEXT DEFAULT 'pending',
+  family_ack_by INTEGER,
+  family_ack_at TEXT,
+  family_note TEXT DEFAULT '',
+  review_status TEXT DEFAULT 'pending',
+  reviewed_by INTEGER,
+  reviewed_at TEXT,
+  review_note TEXT DEFAULT '',
+  created_by INTEGER,
+  created_by_name TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS refund_plan_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id INTEGER NOT NULL REFERENCES refund_plans(id),
+  user_id INTEGER,
+  user_name TEXT DEFAULT '',
+  action TEXT NOT NULL,
+  note TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   stay_id INTEGER NOT NULL REFERENCES stays(id),
@@ -296,6 +350,11 @@ export function getDb(): DatabaseSync {
   db.exec("PRAGMA journal_mode=WAL;");
   db.exec("PRAGMA foreign_keys=ON;");
   db.exec(SCHEMA);
+  // 老库平滑迁移：stays.checkout_date（提前退所申请日期）
+  const stayCols = db.prepare("PRAGMA table_info(stays)").all() as { name: string }[];
+  if (!stayCols.some((c) => c.name === "checkout_date")) {
+    db.exec("ALTER TABLE stays ADD COLUMN checkout_date TEXT");
+  }
   const cnt = db.prepare("SELECT COUNT(*) AS c FROM users").get() as Row;
   if (Number(cnt.c) === 0) {
     seed(db);
@@ -333,6 +392,10 @@ export function addDays(date: string, days: number): string {
 function seed(db: DatabaseSync) {
   const ins = (sql: string, ...params: (string | number | null)[]) =>
     db.prepare(sql).run(...params);
+  const addAudit = (stayId: number | null, actorId: number | null, actor: string, action: string, detail: string, at: string | null = null) =>
+    ins(`INSERT INTO audit_logs(stay_id,actor_id,actor_name,action,detail,created_at)
+      VALUES(?,?,?,?,?,COALESCE(?,datetime('now','localtime')))`,
+      stayId, actorId, actor, action, detail, at);
 
   // ---- 用户 ----
   const addUser = (username: string, password: string, name: string, role: string, phone = "") => {
@@ -526,6 +589,8 @@ function seed(db: DatabaseSync) {
   addSched(stayA, therapist, "盆底肌修复（第3节）", "2026-09-26 10:00");
   addSched(stayA, therapist, "腹直肌修复（第2节）", "2026-09-28 10:00");
   addSched(stayB, therapist, "盆底肌修复（第1节）", "2026-09-24 14:00", "delayed", "产康师临时外出培训，改期至9-27");
+  addSched(stayB, therapist, "盆底肌修复（第1节·改期完成）", "2026-09-27 14:00", "done");
+  addSched(stayB, therapist, "腹直肌修复（第1节）", "2026-09-28 10:00", "done");
 
   // ---- 宝宝托管日志 ----
   const addHosting = (stayId: number, baby: string, type: string, start: string, end: string | null, cgId: number, cgName: string, notes: string) =>
@@ -610,6 +675,35 @@ function seed(db: DatabaseSync) {
     "套餐68800 + 产康加项1280 - 争议减免640 = 应收69440；押金8000退还；实收70080（含押金抵扣）",
     "confirmed", finance, "2026-08-29 15:30:00");
 
+  // ---- 提前退所退款方案（B 901 进行中：家庭原因，财务已核对+冻结尾款，待护理主管核对护理动作）----
+  ins("UPDATE stays SET checkout_date=? WHERE id=?", "2026-09-30", stayB);
+  const ex7 = addException(stayB, "early_checkout", "产妇申请提前退所（家庭原因）",
+    "应出所2026-10-03，拟2026-09-30提前退所（家庭原因）。平台核对已住天数、已执行产康、餐食成本、赠送服务与押金，退款方案生成中。",
+    "high", "open", family2, "刘洋（家属）", "finance", 1, "", "2026-09-30 08:50:00");
+  addEvent(ex7, family2, "刘洋（家属）", "created", "因家庭原因需提前3天退所，请协助办理退款。", "2026-09-30 08:50:00");
+  addEvent(ex7, finance, "吴会计（财务）", "accepted", "已发起退款核对并冻结套餐尾款，待护理主管核对护理动作后同步家属。", "2026-09-30 09:10:00");
+
+  const planB = Number(ins(
+    `INSERT INTO refund_plans(stay_id,reason,checkout_date,stayed_days,remaining_days,daily_rate,room_charge,
+      meal_days,meal_unit_cost,meal_cost,recovery_done_count,recovery_unit_cost,recovery_cost,
+      gifts_delivered_value,gifts_note,deposit_amount,extra_charge,other_deduction,other_adjustment,adjustment_note,
+      frozen_balance,total_consumed,total_refund,status,care_verified,family_status,review_status,created_by,created_by_name,created_at,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    stayB, "家庭原因需提前回乡", "2026-09-30", 25, 3, 2457.14, 61429,
+    25, 120, 3000, 2, 380, 760,
+    300, "待产大礼包已发放（折算300元）；宝宝艺术照待发放，随退所核销不收费", 8000, 0, 0, 0, "",
+    68800, 65489, 11311, "frozen", 0, "pending", "pending", finance, "吴会计（财务）",
+    "2026-09-30 09:05:00", "2026-09-30 09:05:00"
+  ).lastInsertRowid);
+  const addPlanEvent = (action: string, note: string, userId: number, userName: string, at: string) =>
+    ins("INSERT INTO refund_plan_events(plan_id,user_id,user_name,action,note,created_at) VALUES(?,?,?,?,?,?)",
+      planB, userId, userName, action, note, at);
+  addPlanEvent("created", "产妇家庭原因申请提前退所，拟2026-09-30退所；平台开始核对已住天数、已执行产康、餐食成本、赠送服务与押金。", finance, "吴会计（财务）", "2026-09-30 09:05:00");
+  addPlanEvent("calculated", "核对：已住25天（房价61429元）、餐食25天×120=3000元、已执行产康2次×380=760元、已发赠品折算300元、押金8000元；应退合计11311元。", finance, "吴会计（财务）", "2026-09-30 09:05:00");
+  addPlanEvent("frozen", "套餐尾款68800元已冻结：退款方案确认前停止追加费用与退款，护理主管需先核对护理动作。", finance, "吴会计（财务）", "2026-09-30 09:05:00");
+  addAudit(stayB, finance, "提前退所核对", "901产妇家庭原因提前退所：已住25天/产康2次/餐食3000元/赠品300元/押金8000元，应退11311元", "2026-09-30 09:05:00");
+  addAudit(stayB, finance, "套餐尾款冻结", "冻结901套餐尾款68800元，退款方案确认前不得追加费用或退款", "2026-09-30 09:05:00");
+
   // ---- 家属沟通 ----
   const addMessage = (stayId: number, userId: number | null, name: string, role: string, audience: string, content: string, at: string | null = null) =>
     ins(`INSERT INTO messages(stay_id,from_user_id,from_name,from_role,audience,content,created_at)
@@ -619,11 +713,6 @@ function seed(db: DatabaseSync) {
   addMessage(stayA, family1, "张强（家属）", "family", "staff", "请问明天下午可以增加一次探访吗？孩子奶奶想来看看。", "2026-09-25 09:20:00");
   addMessage(stayB, family2, "刘洋（家属）", "family", "staff", "今晚我下班后想临时过来看一下，大概19:00到。", "2026-09-25 12:00:00");
 
-  // ---- 审计日志 ----
-  const addAudit = (stayId: number | null, actorId: number | null, actor: string, action: string, detail: string, at: string | null = null) =>
-    ins(`INSERT INTO audit_logs(stay_id,actor_id,actor_name,action,detail,created_at)
-      VALUES(?,?,?,?,?,COALESCE(?,datetime('now','localtime')))`,
-      stayId, actorId, actor, action, detail, at);
   addAudit(stayA, front, "小钱（前台）", "入住登记", "张丽入住801（尊享42天套餐），建立护理计划7项", "2026-09-13 10:00:00");
   addAudit(stayA, finance, "吴会计（财务）", "费用登记", "套餐费用108800元、押金10000元", "2026-09-13 10:05:00");
   addAudit(stayA, nurse1, "王芳（护理师）", "护理记录", "晨间查房完成，宝宝黄疸复测12.9mg/dL", "2026-09-25 09:35:00");

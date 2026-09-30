@@ -92,6 +92,21 @@ export function money(n: unknown): string {
   return "¥" + v.toLocaleString("zh-CN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+// 提前退所退款方案状态
+export const REFUND_PLAN_STATUS: Record<string, string> = {
+  frozen: "尾款已冻结·待护理核对",
+  care_verified: "护理已核对·待同步家属",
+  family_synced: "已同步家属·待财务复核",
+  disputed: "家属有异议·处理中",
+  reviewed: "财务已复核·已退款出所",
+  cancelled: "已撤回",
+};
+export const FAMILY_PLAN_STATUS: Record<string, string> = {
+  pending: "待家属知悉",
+  acked: "家属已知悉",
+  disputed: "家属有异议",
+};
+
 export function dt(s: unknown): string {
   if (!s) return "-";
   return String(s).slice(0, 16);
@@ -99,11 +114,11 @@ export function dt(s: unknown): string {
 
 export function badgeClass(status: string): string {
   switch (status) {
-    case "open": case "pending": case "issue": case "new": return "badge red";
-    case "processing": case "planned": case "scheduled": case "following": case "draft": return "badge amber";
-    case "resolved": case "done": case "confirmed": case "approved": case "delivered": case "responded": case "converted": return "badge green";
+    case "open": case "pending": case "issue": case "new": case "frozen": case "disputed": return "badge red";
+    case "processing": case "planned": case "scheduled": case "following": case "draft": case "care_verified": return "badge amber";
+    case "resolved": case "done": case "confirmed": case "approved": case "delivered": case "responded": case "converted": case "reviewed": case "acked": return "badge green";
     case "closed": case "cancelled": case "void": case "rejected": case "lost": return "badge gray";
-    case "completed": case "active": case "in_stay": return "badge blue";
+    case "completed": case "active": case "in_stay": case "family_synced": return "badge blue";
     case "checked_out": return "badge gray";
     default: return "badge gray";
   }

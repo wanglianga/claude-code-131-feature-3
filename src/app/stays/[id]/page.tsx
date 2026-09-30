@@ -6,7 +6,7 @@ import { AppShell, Section, DataTable, KV, Badge } from "@/components/ui";
 import { DataForm, ActionButton } from "@/components/client";
 import {
   PLAN_TYPES, EX_TYPES, EX_STATUS, SEVERITY, FEE_TYPES, TASK_STATUS, VISIT_STATUS,
-  money, dt, badgeClass, severityClass,
+  REFUND_PLAN_STATUS, FAMILY_PLAN_STATUS, money, dt, badgeClass, severityClass,
 } from "@/lib/labels";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +35,11 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
   const gifts = q("SELECT * FROM gifts WHERE stay_id=? ORDER BY id", stayId);
   const fees = q("SELECT * FROM fees WHERE stay_id=? ORDER BY created_at DESC", stayId);
   const settlement = q1("SELECT * FROM settlements WHERE stay_id=?", stayId);
+  const refundPlan = q1("SELECT * FROM refund_plans WHERE stay_id=? ORDER BY id DESC LIMIT 1", stayId);
+  const planEvents = refundPlan
+    ? q("SELECT * FROM refund_plan_events WHERE plan_id=? ORDER BY created_at", Number(refundPlan.id))
+    : [];
+  const refundActive = refundPlan && ["frozen", "care_verified", "family_synced", "disputed"].includes(String(refundPlan.status));
   const exceptions = q("SELECT * FROM exceptions WHERE stay_id=? ORDER BY status='open' DESC, id DESC", stayId);
   const exEvents = q(`SELECT e.* FROM exception_events e JOIN exceptions x ON x.id=e.exception_id
                       WHERE x.stay_id=? ORDER BY e.created_at DESC LIMIT 30`, stayId);
@@ -333,9 +338,67 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
         </Section>
       </div>
 
+      {/* 提前退所退款方案 */}
+      {refundPlan && (
+        <Section title={`提前退所退款方案 #${refundPlan.id}`}
+          tone={refundActive ? "tone-red" : ""}
+          extra={<Badge text={REFUND_PLAN_STATUS[String(refundPlan.status)] || String(refundPlan.status)} cls={badgeClass(String(refundPlan.status))} />}>
+          <div className="small muted">退所原因：{String(refundPlan.reason)} ｜ 拟退所：{String(refundPlan.checkout_date)}（已住 {String(refundPlan.stayed_days)} 天 / 剩余 {String(refundPlan.remaining_days)} 天）</div>
+          <div className="mt8">
+            <KV items={[
+              ["房型费用", `${money(refundPlan.room_charge)}（日均价 ${money(refundPlan.daily_rate)} × ${refundPlan.stayed_days}天）`],
+              ["餐食成本", `${money(refundPlan.meal_cost)}（${refundPlan.meal_days}天 × ${money(refundPlan.meal_unit_cost)}）`],
+              ["已执行产康", `${money(refundPlan.recovery_cost)}（${refundPlan.recovery_done_count}次 × ${money(refundPlan.recovery_unit_cost)}）`],
+              ["赠送服务", <span key="g">{money(refundPlan.gifts_delivered_value)}<div className="muted small">{String(refundPlan.gifts_note)}</div></span>],
+              ["押金", money(refundPlan.deposit_amount)],
+              ["增项/其他", `${money(refundPlan.extra_charge)} / 扣减 ${money(refundPlan.other_deduction)}，调整 ${money(refundPlan.other_adjustment)}`],
+              ["已消费合计", money(refundPlan.total_consumed)],
+              ["应退合计", <b key="r" style={{ color: "#0b7" }}>{money(refundPlan.total_refund)}</b>],
+              ["套餐尾款", <span key="f" className="badge red">冻结 {money(refundPlan.frozen_balance)}</span>],
+              ["护理动作核对", Number(refundPlan.care_verified)
+                ? <span key="y" className="badge green">护士长已核对 {dt(refundPlan.care_verified_at)}<div className="muted small">{String(refundPlan.care_note)}</div></span>
+                : <span key="n" className="badge amber">待护理主管核对</span>],
+              ["家属端", <Badge key="fs" text={FAMILY_PLAN_STATUS[String(refundPlan.family_status)] || String(refundPlan.family_status)} cls={refundPlan.family_status === "acked" ? "badge green" : refundPlan.family_status === "disputed" ? "badge red" : "badge amber"} />],
+              ["财务复核", refundPlan.status === "reviewed"
+                ? <span key="y" className="badge green">已复核 {dt(refundPlan.reviewed_at)}：{String(refundPlan.review_note)}</span>
+                : <span key="n" className="badge amber">待复核</span>],
+            ]} />
+          </div>
+          <ul className="timeline mt8">
+            {planEvents.map((ev) => (
+              <li key={String(ev.id)}>
+                <span className="t-time">{dt(ev.created_at)}</span>
+                <span className="badge blue">{String(ev.action)}</span> <b>{String(ev.user_name)}</b>：{String(ev.note)}
+              </li>
+            ))}
+          </ul>
+          <div className="mt8 row">
+            {refundPlan.status === "frozen" && can(user, ["head_nurse", "admin"]) && Number(refundPlan.care_verified) === 0 && (
+              <DataForm compact action="care.verify" hidden={{ planId: Number(refundPlan.id) }}
+                fields={[{ name: "careNote", label: "核对说明（可选）" }]}
+                submitLabel="护理主管确认护理动作并安排出所回访" />
+            )}
+            {refundPlan.status === "care_verified" && can(user, ["finance", "admin"]) && (
+              <ActionButton action="refund_plans.confirm" payload={{ id: Number(refundPlan.id) }} label="同步退款方案至家属端" kind="primary" />
+            )}
+            {refundPlan.status === "family_synced" && can(user, ["finance", "admin"]) && (
+              <ActionButton action="refund_plans.review" payload={{ id: Number(refundPlan.id) }} label="财务复核退款并办理出所" kind="primary"
+                confirm="复核通过后生成退款流水、确认结算单并办理出所，确定？" />
+            )}
+            {refundPlan.status === "disputed" && can(user, ["head_nurse", "finance", "admin"]) && (
+              <DataForm compact action="refund_plans.resolve_dispute" hidden={{ id: Number(refundPlan.id) }}
+                fields={[{ name: "note", label: "家属异议处理说明", required: true }]} submitLabel="处理异议并退回同步" />
+            )}
+            {refundActive && can(user, ["finance", "admin"]) && (
+              <ActionButton action="refund_plans.cancel" payload={{ id: Number(refundPlan.id) }} label="撤回方案（解冻）" kind="danger" confirm="撤回后冻结解除，确定？" />
+            )}
+          </div>
+        </Section>
+      )}
+
       {/* 费用与结算 */}
       <Section title="费用明细与结算"
-        extra={can(user, ["finance", "admin"]) ? (
+        extra={!refundActive && can(user, ["finance", "admin"]) ? (
           <span className="row">
             <DataForm compact action="fees.create" hidden={{ stayId }}
               fields={[
@@ -346,6 +409,11 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
               ]} submitLabel="登记费用" />
           </span>
         ) : undefined}>
+        {refundActive && (
+          <div className="badge red" style={{ display: "block", marginBottom: 8, padding: 8 }}>
+            套餐尾款已冻结（退款方案#{String(refundPlan.id)}处理中）：退款方案确认前停止登记费用/退款，护理主管核对护理动作、家属知悉后由财务复核。
+          </div>
+        )}
         <DataTable cols={["时间", "类型", "说明", "方向", "金额", "状态"]} empty="暂无费用"
           rows={fees.map((f) => [
             <span key="a" className="small">{dt(f.created_at)}</span>,
@@ -365,7 +433,7 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
               ["状态", <Badge key="s" text={settlement.status === "confirmed" ? "已确认" : "待确认"} cls={badgeClass(String(settlement.status))} />],
               ["说明", String(settlement.detail || "-")],
             ]} />
-            {settlement.status !== "confirmed" && can(user, ["finance", "admin"]) && (
+            {settlement.status !== "confirmed" && !refundActive && can(user, ["finance", "admin"]) && (
               <div className="mt8">
                 <ActionButton action="settlements.confirm" payload={{ stayId }} label="确认结算（实收=应收-退款）" kind="primary"
                   confirm="确认该订单结算无误？" />
@@ -373,17 +441,23 @@ export default async function StayPage({ params }: { params: Promise<{ id: strin
             )}
           </div>
         ) : <div className="muted small mt8">尚未生成结算单（办理出所时自动生成）。</div>}
-        {inStay && can(user, ["frontdesk", "finance", "admin"]) && (
+        {inStay && !refundActive && can(user, ["frontdesk", "finance", "admin"]) && (
           <div className="mt16 row">
             <DataForm compact action="stays.checkout" hidden={{ stayId }}
-              fields={[{ name: "reason", label: "退所原因（提前退所必填）" }]}
-              submitLabel="办理出所 / 提前退所" />
+              fields={[{ name: "reason", label: "出所备注（正常到期可留空）" }]}
+              submitLabel="办理正常出所" />
             {can(user, ["frontdesk", "admin"]) && (
               <DataForm compact action="stays.upgrade" hidden={{ stayId }}
                 fields={[{ name: "newPackageId", label: "升级至套餐", type: "select", required: true, options: packages.map((p) => ({ value: String(p.id), label: `${p.name}（${money(p.price)}）` })) }]}
                 submitLabel="套餐升级" />
             )}
           </div>
+        )}
+        {inStay && refundActive && (
+          <div className="muted small mt8">该房正在办理提前退所（退款方案#{String(refundPlan?.id)}），完成护理核对→家属同步→财务复核后自动出所，无需在此办理。</div>
+        )}
+        {inStay && !refundActive && can(user, ["finance", "admin"]) && (
+          <div className="muted small mt8">提前退所请前往 <Link href="/finance">财务工作台 → 提前退所结算</Link> 发起退款方案（核对已住天数/产康/餐食/赠品/押金并冻结套餐尾款）。</div>
         )}
       </Section>
 

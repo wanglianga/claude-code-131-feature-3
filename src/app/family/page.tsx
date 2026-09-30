@@ -3,14 +3,16 @@ import { q, q1 } from "@/lib/db";
 import { requireUser } from "@/lib/guard";
 import { AppShell, Section, DataTable, KV, Badge } from "@/components/ui";
 import { DataForm } from "@/components/client";
-import { PLAN_TYPES, VISIT_STATUS, FEE_TYPES, money, dt, badgeClass } from "@/lib/labels";
+import { PLAN_TYPES, VISIT_STATUS, FEE_TYPES, REFUND_PLAN_STATUS, money, dt, badgeClass } from "@/lib/labels";
 
 export const dynamic = "force-dynamic";
 
 export default async function FamilyPage() {
   const user = await requireUser(["family"]);
   const link = q1(
-    `SELECT fl.stay_id, fl.relation, fl.name AS link_name FROM family_links fl WHERE fl.user_id=? LIMIT 1`, user.id);
+    `SELECT fl.stay_id, fl.relation, fl.name AS link_name FROM family_links fl
+     JOIN stays s ON s.id=fl.stay_id
+     WHERE fl.user_id=? ORDER BY s.status='in_stay' DESC, fl.id DESC LIMIT 1`, user.id);
   if (!link) {
     return (
       <AppShell title="家属端">
@@ -37,6 +39,12 @@ export default async function FamilyPage() {
   const visits = showVisits ? q("SELECT * FROM visits WHERE stay_id=? ORDER BY visit_time DESC LIMIT 10", stayId) : [];
   const fees = showFees ? q("SELECT * FROM fees WHERE stay_id=? AND status='confirmed' ORDER BY created_at", stayId) : [];
   const settlement = showFees ? q1("SELECT * FROM settlements WHERE stay_id=?", stayId) : undefined;
+  const refundPlan = showFees
+    ? q1("SELECT * FROM refund_plans WHERE stay_id=? AND status IN ('family_synced','disputed','reviewed') ORDER BY id DESC LIMIT 1", stayId)
+    : undefined;
+  const planEvents = refundPlan
+    ? q("SELECT * FROM refund_plan_events WHERE plan_id=? AND action IN ('family_synced','family_acked','family_disputed','dispute_resolved','reviewed') ORDER BY created_at", Number(refundPlan.id))
+    : [];
   const feedbacks = q("SELECT * FROM feedbacks WHERE stay_id=? ORDER BY created_at DESC LIMIT 10", stayId);
   const followUps = q("SELECT * FROM follow_ups WHERE stay_id=? ORDER BY scheduled_at", stayId);
   const messages = q("SELECT * FROM messages WHERE stay_id=? AND audience IN ('all','family') ORDER BY created_at DESC LIMIT 10", stayId);
@@ -57,6 +65,63 @@ export default async function FamilyPage() {
           ["我的身份", `${link.link_name}（${link.relation}）`],
         ]} />
       </Section>
+
+      {refundPlan && (
+        <Section title="提前退所退款方案（家属端同步）"
+          tone={refundPlan.status === "disputed" ? "tone-red" : ""}
+          extra={
+            <Badge
+              text={REFUND_PLAN_STATUS[String(refundPlan.status)] || String(refundPlan.status)}
+              cls={badgeClass(String(refundPlan.status === "family_synced" ? "processing" : refundPlan.status))} />
+          }>
+          <div className="small muted">退所原因：{String(refundPlan.reason)} ｜ 拟退所日期：{String(refundPlan.checkout_date)}</div>
+          <div className="mt8">
+            <KV items={[
+              ["已住 / 未住天数", `${refundPlan.stayed_days} 天 / ${refundPlan.remaining_days} 天（日均价 ${money(refundPlan.daily_rate)}）`],
+              ["房型费用", money(refundPlan.room_charge)],
+              ["餐食成本", `${money(refundPlan.meal_cost)}（${refundPlan.meal_days} 天 × ${money(refundPlan.meal_unit_cost)}）`],
+              ["已执行产康", `${money(refundPlan.recovery_cost)}（${refundPlan.recovery_done_count} 次 × ${money(refundPlan.recovery_unit_cost)}）`],
+              ["赠送服务", <span key="g">{money(refundPlan.gifts_delivered_value)}<div className="muted small">{String(refundPlan.gifts_note)}</div></span>],
+              ["押金", `${money(refundPlan.deposit_amount)}（原路退还）`],
+              ["应退合计", <b key="r" style={{ color: "#0b7" }}>{money(refundPlan.total_refund)}</b>],
+              ["护理动作核对", Number(refundPlan.care_verified)
+                ? <span key="y" className="badge green">护士长已核对 {dt(refundPlan.care_verified_at)}</span>
+                : <span key="n" className="badge amber">核对中</span>],
+              ["财务复核", refundPlan.status === "reviewed"
+                ? <span key="y" className="badge green">已复核 {dt(refundPlan.reviewed_at)}，{String(refundPlan.review_note)}</span>
+                : <span key="n" className="badge amber">待财务复核</span>],
+            ]} />
+          </div>
+          <div className="muted small mt8">套餐尾款已冻结：方案确认前中心不会追加费用或退款；出所回访已同步安排。</div>
+          {refundPlan.status !== "reviewed" && (
+            <div className="mt8 row">
+              {refundPlan.family_status !== "acked" && (
+                <DataForm compact action="refund_plans.ack" hidden={{ id: Number(refundPlan.id) }}
+                  fields={[{ name: "note", label: "知悉备注（可选）", placeholder: "已知悉退款明细，无异议" }]}
+                  submitLabel="已知悉，等待退款" />
+              )}
+              {refundPlan.family_status === "acked" && <span className="badge green">您已知悉该方案</span>}
+              {refundPlan.family_status === "disputed" && <span className="badge red">您的异议处理中：{String(refundPlan.family_note)}</span>}
+              <DataForm compact action="refund_plans.dispute" hidden={{ id: Number(refundPlan.id) }}
+                fields={[{ name: "note", label: "如有异议请说明（必填）", required: true, placeholder: "如：对餐食天数/产康次数有疑问" }]}
+                submitLabel="提出异议" />
+            </div>
+          )}
+          {refundPlan.status === "reviewed" && (
+            <div className="mt8 badge green" style={{ padding: 8 }}>
+              退款已财务复核，{Number(refundPlan.total_refund) >= 0 ? `${money(refundPlan.total_refund)} 将按支付渠道退回` : `应补 ${money(-Number(refundPlan.total_refund))}`}；出所手续已办结，请留意出所回访电话。
+            </div>
+          )}
+          <ul className="timeline mt8">
+            {planEvents.map((ev) => (
+              <li key={String(ev.id)}>
+                <span className="t-time">{dt(ev.created_at)}</span>
+                <b>{String(ev.user_name)}</b> {String(ev.note)}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
 
       {showCare && (
         <div className="grid cols-2">

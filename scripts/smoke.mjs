@@ -148,24 +148,102 @@ let smokeRoomId = null;
       smokeStayId = r.id;
       const fam = await login("smokefam", "smoke123");
       check("新家属账号可登录", fam.ok === true);
+      cookies["smokefam"] = fam.cookie;
       const page = await get("/family", fam.cookie);
       check("新家属端显示入住信息", page.status === 200 && page.text.includes("冒烟测试产妇"));
     }
   }
 }
 
-// 13. 财务登记费用并走完整出所结算流程
+// 13. 提前退所完整结算流程：发起核对→冻结套餐尾款→护理核对拦截→护士长核对+出所回访→家属同步→异议/知悉→财务复核出所
 if (smokeStayId) {
   const stays = await get("/finance", cookies["finance"]);
-  check("财务工作台可访问", stays.status === 200);
+  check("财务工作台含提前退所结算区", stays.status === 200 && stays.text.includes("提前退所结算"));
   const fee = await doAction(cookies["finance"], { action: "fees.create", stayId: smokeStayId, type: "extra", direction: "charge", amount: 100, description: "冒烟测试增项" });
-  check("财务登记增项费用", fee.ok === true);
-  const co = await doAction(cookies["finance"], { action: "stays.checkout", stayId: smokeStayId, reason: "冒烟测试提前退所" });
-  check("办理提前退所", co.ok === true, JSON.stringify(co));
-  const st = await doAction(cookies["finance"], { action: "settlements.confirm", stayId: smokeStayId });
-  check("确认结算", st.ok === true, JSON.stringify(st));
+  check("财务登记增项费用（冻结前）", fee.ok === true);
+
+  // 旧的直接办理提前退所入口应被引导到新流程
+  const coOld = await doAction(cookies["finance"], { action: "stays.checkout", stayId: smokeStayId, reason: "冒烟测试提前退所" });
+  check("提前退所不再走旧的直接出所入口", coOld.ok === false && String(coOld.error).includes("退款方案"));
+
+  // 财务发起退款方案：核对已住天数/产康/餐食/赠品/押金，冻结套餐尾款
+  const plan = await doAction(cookies["finance"], {
+    action: "refund_plans.create", stayId: smokeStayId, checkoutDate: "2026-09-26", reason: "冒烟测试家庭原因提前退所",
+    mealUnitCost: 120, recoveryUnitCost: 380, giftUnitValue: 300,
+  });
+  check("发起退款方案并冻结套餐尾款", plan.ok === true && plan.id > 0, JSON.stringify(plan));
+  const planId = plan.id;
+
+  // 冻结期：追加费用、确认结算均被拦截
+  const feeFrozen = await doAction(cookies["finance"], { action: "fees.create", stayId: smokeStayId, type: "extra", direction: "charge", amount: 50, description: "冻结期加项" });
+  check("尾款冻结期禁止追加费用", feeFrozen.ok === false && String(feeFrozen.error).includes("冻结"));
+  const settleFrozen = await doAction(cookies["finance"], { action: "settlements.confirm", stayId: smokeStayId });
+  check("尾款冻结期禁止直接确认结算", settleFrozen.ok === false);
+
+  // 护理主管未核对前，财务不能同步家属
+  const syncEarly = await doAction(cookies["finance"], { action: "refund_plans.confirm", id: planId });
+  check("护理未核对时同步家属被拦截", syncEarly.ok === false && String(syncEarly.error.error || syncEarly.error).includes("护理主管"));
+
+  // 护士长核对护理动作（同步生成出所回访）
+  const verify = await doAction(cookies["headnurse"], { action: "care.verify", planId, careNote: "冒烟核对：护理动作与费用一致" });
+  check("护理主管核对护理动作并生成出所回访", verify.ok === true, JSON.stringify(verify));
+  const headPage = await get("/headnurse", cookies["headnurse"]);
+  check("护士长工作台含护理动作核对区", headPage.text.includes("护理动作核对"));
+
+  // 家属同步前，家属端看不到方案
+  const famBefore = await get("/family", cookies["smokefam"]);
+  check("同步前家属端不显示退款方案", !famBefore.text.includes("提前退所退款方案（家属端同步）"));
+
+  // 财务同步家属端
+  const sync = await doAction(cookies["finance"], { action: "refund_plans.confirm", id: planId });
+  check("退款方案同步家属端", sync.ok === true, JSON.stringify(sync));
+  const famPage = await get("/family", cookies["smokefam"]);
+  check("家属端显示退款方案明细与冻结提示", famPage.text.includes("提前退所退款方案") && famPage.text.includes("应退合计"));
+
+  // 家属先提异议 → 护士长/财务处理 → 重新同步 → 家属知悉
+  const dispute = await doAction(cookies["smokefam"], { action: "refund_plans.dispute", id: planId, note: "冒烟异议：餐食天数需复核" });
+  check("家属对退款方案提出异议", dispute.ok === true);
+  const reviewDuringDispute = await doAction(cookies["finance"], { action: "refund_plans.review", id: planId });
+  check("异议未处理时财务复核被拦截", reviewDuringDispute.ok === false);
+  const resolveDisp = await doAction(cookies["headnurse"], { action: "refund_plans.resolve_dispute", id: planId, note: "已复核餐食天数无误，向家属解释" });
+  check("异议处理后退回重新同步", resolveDisp.ok === true);
+  const sync2 = await doAction(cookies["finance"], { action: "refund_plans.confirm", id: planId });
+  check("异议处理后重新同步家属", sync2.ok === true);
+  const ack = await doAction(cookies["smokefam"], { action: "refund_plans.ack", id: planId, note: "已知悉，无异议" });
+  check("家属知悉退款方案", ack.ok === true);
+
+  // 财务复核退款 → 退款流水/已确认结算单/出所
+  const reviewed = await doAction(cookies["finance"], { action: "refund_plans.review", id: planId, reviewNote: "冒烟复核无误" });
+  check("财务复核退款并办理出所", reviewed.ok === true && String(reviewed.message).includes("退款"), JSON.stringify(reviewed));
+  const famAfter = await get("/family", cookies["smokefam"]);
+  check("家属端显示退款已复核", famAfter.text.includes("退款已财务复核"));
+  const finPage = await get("/finance", cookies["finance"]);
+  check("财务工作台结算单已确认且有提前退所退款流水", finPage.text.includes("提前退所退款"));
+
   // 清理：房间恢复空房，保证冒烟可重复运行
   await doAction(cookies["front"], { action: "rooms.update", id: smokeRoomId, status: "vacant" });
+}
+
+// 13b. 种子数据：901 房进行中的退款方案（财务已核对冻结，待护士长核对）——可重复运行，停在"已同步家属"以保留在住演示数据
+{
+  const fam2Login = await login("family2", "family123");
+  check("901家属 family2 登录", fam2Login.ok === true);
+  cookies["family2"] = fam2Login.cookie;
+  let fam2 = await get("/family", cookies["family2"]);
+  const alreadySynced = fam2.text.includes("提前退所退款方案");
+  if (!alreadySynced) {
+    const hp = await get("/headnurse", cookies["headnurse"]);
+    check("护士长看到901待核对的提前退所方案", hp.text.includes("提前退所 · 护理动作核对"));
+    const v = await doAction(cookies["headnurse"], { action: "care.verify", planId: 1, careNote: "护理动作与费用记录一致" });
+    check("护士长核对种子退款方案#1", v.ok === true, JSON.stringify(v));
+    const s = await doAction(cookies["finance"], { action: "refund_plans.confirm", id: 1 });
+    check("财务同步种子方案#1至家属端", s.ok === true, JSON.stringify(s));
+    fam2 = await get("/family", cookies["family2"]);
+  }
+  check("901家属端可见退款方案（应退11,311元）", fam2.text.includes("提前退所退款方案") && fam2.text.includes("11,311"));
+  // 901 仍为在住订单（种子演示数据保留）
+  const famStay = await get("/stays/2", cookies["admin"]);
+  check("901核对同步后仍为在住（复核才出所）", famStay.status === 200 && famStay.text.includes("在住"));
 }
 
 // 14. 家属反馈 → 护士长回复并标记影响排班

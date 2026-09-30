@@ -1,0 +1,14 @@
+services:
+  mcare:
+    build: .
+    image: mooncare-platform:latest
+    container_name: mooncare-platform
+    ports:
+      - "3000:3000"
+    volumes:
+      # SQLite 数据持久化；首次启动自动建表并写入演示数据
+      - ./data:/app/data
+    environment:
+      # 生产环境请改成固定密钥
+      MCARE_SECRET: change-me-in-production
+    restart: unless-stopped
